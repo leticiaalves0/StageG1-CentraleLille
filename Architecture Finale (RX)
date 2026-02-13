@@ -1,0 +1,112 @@
+// rx_zone_decision.c
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static int gpio_export_if_needed(int gpio_num) {
+    char path[128];
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d", gpio_num);
+    if (access(path, F_OK) == 0) return 0;
+
+    int fd = open("/sys/class/gpio/export", O_WRONLY);
+    if (fd < 0) return -1;
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%d", gpio_num);
+    write(fd, buf, len);
+    close(fd);
+    return 0;
+}
+
+static int gpio_write_str(int gpio, const char *file, const char *val) {
+    char path[128];
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/%s", gpio, file);
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    write(fd, val, strlen(val));
+    close(fd);
+    return 0;
+}
+
+static int gpio_open_value_ro(int gpio) {
+    char path[128];
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", gpio);
+    return open(path, O_RDONLY | O_NONBLOCK);
+}
+
+static int gpio_open_value_wo(int gpio) {
+    char path[128];
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", gpio);
+    return open(path, O_WRONLY);
+}
+
+static int read_value01(int fd){
+    char c = '0';
+    lseek(fd, 0, SEEK_SET);
+    read(fd, &c, 1);
+    return (c == '1') ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+
+    int gpio_in   = (argc >= 2) ? atoi(argv[1]) : 17;
+    int gpio_zone = (argc >= 3) ? atoi(argv[2]) : 22;
+    int gpio_dec  = (argc >= 4) ? atoi(argv[3]) : 23;
+
+    // INPUT
+    gpio_export_if_needed(gpio_in);
+    gpio_write_str(gpio_in, "direction", "in");
+    gpio_write_str(gpio_in, "edge", "both");
+
+    int fd_in = gpio_open_value_ro(gpio_in);
+
+    // OUTPUTS
+    gpio_export_if_needed(gpio_zone);
+    gpio_write_str(gpio_zone, "direction", "out");
+    int fd_zone = gpio_open_value_wo(gpio_zone);
+
+    gpio_export_if_needed(gpio_dec);
+    gpio_write_str(gpio_dec, "direction", "out");
+    int fd_dec = gpio_open_value_wo(gpio_dec);
+
+    // Estado inicial
+    int v = read_value01(fd_in);
+    if (v) {
+        write(fd_zone,"1",1);
+        write(fd_dec,"0",1);
+    } else {
+        write(fd_zone,"0",1);
+        write(fd_dec,"1",1);
+    }
+
+    char dummy[8];
+    lseek(fd_in,0,SEEK_SET);
+    read(fd_in,dummy,sizeof(dummy));
+
+    struct pollfd pfd = { .fd = fd_in, .events = POLLPRI | POLLERR };
+
+    while (1) {
+
+        int r = poll(&pfd,1,-1);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        int val = read_value01(fd_in);
+
+        if (val) {
+            write(fd_zone,"1",1);
+            write(fd_dec,"0",1);
+        } else {
+            write(fd_zone,"0",1);
+            write(fd_dec,"1",1);
+        }
+    }
+
+    return 0;
+}
